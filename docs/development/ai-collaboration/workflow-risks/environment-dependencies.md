@@ -208,6 +208,7 @@ ClaudeCode実行環境の特性:
   - export した変数が次回利用できない
   - cd でディレクトリ移動しても無効
   - サービス起動後に制御不可
+  - Git操作の状態が引き継がれない
 ```
 
 **回避策**
@@ -230,6 +231,88 @@ cd /target/directory
 command_sequence
 EOF
 bash temp_script.sh
+
+# 5. Git操作の確実な実行
+git add . && git commit -m "message" && git push origin main
+```
+
+#### Git操作の状態管理問題
+
+**問題の概要**
+```yaml
+症状:
+  - git commitは成功するがgit pushが実行されない
+  - ローカルコミットがリモートに反映されない
+  - "ahead of origin" 状態が継続する
+
+根本原因:
+  - ClaudeCodeの各コマンドは独立プロセス
+  - git addからgit pushまでの状態が保持されない
+  - 手動でプッシュを忘れるリスク
+
+影響度: 高（重要な実装がGitHubに反映されない）
+```
+
+**実例: AWS S3統合実装での発生事例**
+```bash
+# ❌ 問題のあるパターン
+git add .                    # ✅ 成功（ファイルステージング）
+git commit -m "AWS S3 impl"  # ✅ 成功（ローカルコミット）
+# git push忘れ               # ❌ 実行漏れ（リモート未反映）
+
+# 結果: GitHubで最新実装が見えない状態
+```
+
+**推奨解決策**
+```bash
+# ✅ 推奨パターン1: チェーン実行
+git add . && git commit -m "message" && git push origin main
+
+# ✅ 推奨パターン2: 確実な段階実行
+git add .
+git commit -m "message"
+git status                    # ← 状態確認
+git push origin main         # ← 必ず実行
+
+# ✅ 推奨パターン3: プッシュ確認付き
+git add . && git commit -m "message"
+echo "Commit completed. Pushing to GitHub..."
+git push origin main && echo "✅ Successfully pushed to GitHub"
+```
+
+**Git操作チェックリスト**
+```bash
+# 作業完了後の必須確認手順
+check_git_status() {
+    echo "=== Git Status Check ==="
+    
+    # 1. ローカル変更確認
+    git status --porcelain
+    
+    # 2. コミット履歴確認
+    git log --oneline -3
+    
+    # 3. リモート同期状態確認
+    git status | grep -E "(ahead|behind|up to date)"
+    
+    # 4. プッシュが必要か判定
+    if git status | grep -q "ahead of"; then
+        echo "⚠️ WARNING: Local commits not pushed to remote"
+        echo "Run: git push origin main"
+    else
+        echo "✅ Repository is up to date with remote"
+    fi
+}
+```
+
+**予防策**
+```bash
+# Git操作のエイリアス設定
+alias git-safe-commit='git add . && git commit -m'
+alias git-full-sync='git add . && git commit -m "$1" && git push origin main'
+
+# 使用例
+git-full-sync "Implement AWS S3 integration Phase 1"
 ```
 
 #### メモリ・リソース制限
