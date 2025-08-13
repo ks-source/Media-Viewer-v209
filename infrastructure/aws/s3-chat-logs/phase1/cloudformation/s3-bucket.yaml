@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'S3 Bucket for Media Viewer v209 AI Chat Logs - Phase 1'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Deployment environment'
+  
+  BucketNamePrefix:
+    Type: String
+    Default: 'media-viewer-v209-chat-logs'
+    Description: 'S3 bucket name prefix'
+
+Resources:
+  # KMS Key for S3 Encryption
+  ChatLogKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS Key for Media Viewer AI Chat Logs Encryption'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow S3 Service
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+          - Sid: Allow Lambda Function
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+
+  # KMS Key Alias
+  ChatLogKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${BucketNamePrefix}-${Environment}-key'
+      TargetKeyId: !Ref ChatLogKMSKey
+
+  # S3 Bucket for AI Chat Logs
+  ChatLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketNamePrefix}-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ChatLogKMSKey
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        CloudWatchConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            CloudWatchConfiguration:
+              LogGroupName: !Ref S3AccessLogGroup
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogBucket
+        LogFilePrefix: 'chat-logs-access/'
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'TransitionToIA'
+            Status: Enabled
+            Prefix: 'chat-logs/'
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: STANDARD_IA
+              - TransitionInDays: 90  
+                StorageClass: GLACIER
+              - TransitionInDays: 365
+                StorageClass: DEEP_ARCHIVE
+          - Id: 'DeleteIncompleteMultipartUploads'
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # Access Log Bucket
+  AccessLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${BucketNamePrefix}-${Environment}-access-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ChatLogKMSKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'DeleteOldAccessLogs'
+            Status: Enabled
+            ExpirationInDays: 90
+
+  # CloudWatch Log Group for S3 Access Monitoring
+  S3AccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/s3/${BucketNamePrefix}-${Environment}/access'
+      RetentionInDays: 30
+
+  # Bucket Policy for Presigned URL Access
+  ChatLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ChatLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureConnections
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !Sub '${ChatLogBucket}/*'
+              - !Ref ChatLogBucket
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowPresignedURLAccess
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:DeleteObject'
+            Resource: !Sub '${ChatLogBucket}/chat-logs/*'
+          - Sid: AllowListBucket
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action: 's3:ListBucket'
+            Resource: !Ref ChatLogBucket
+            Condition:
+              StringLike:
+                's3:prefix': 'chat-logs/*'
+
+  # IAM Role for Lambda Function
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${BucketNamePrefix}-${Environment}-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3ChatLogAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub '${ChatLogBucket}/*'
+                  - !Ref ChatLogBucket
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                  - 'kms:GenerateDataKey'
+                Resource: !GetAtt ChatLogKMSKey.Arn
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+
+Outputs:
+  BucketName:
+    Description: 'Name of the S3 bucket for chat logs'
+    Value: !Ref ChatLogBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketName'
+
+  BucketArn:
+    Description: 'ARN of the S3 bucket for chat logs'
+    Value: !GetAtt ChatLogBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BucketArn'
+
+  KMSKeyId:
+    Description: 'KMS Key ID for encryption'
+    Value: !Ref ChatLogKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyId'
+
+  KMSKeyArn:
+    Description: 'KMS Key ARN for encryption'
+    Value: !GetAtt ChatLogKMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
+
+  LambdaExecutionRoleArn:
+    Description: 'ARN of the Lambda execution role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaExecutionRoleArn'
+
+  S3AccessLogGroup:
+    Description: 'CloudWatch Log Group for S3 access monitoring'
+    Value: !Ref S3AccessLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-S3AccessLogGroup'

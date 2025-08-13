@@ -447,11 +447,151 @@ wait_for_rate_limit_reset() {
 }
 ```
 
+### 🚨 GitHub不可逆操作制限
+
+#### 削除操作の完全不可逆性
+
+**Projects v2 削除の制約**
+```yaml
+削除操作の特性:
+  - プロジェクト削除は即座に実行・完全不可逆
+  - GitHubには「ゴミ箱」機能が存在しない
+  - 有料プランでも復旧機能は提供されない
+  - GitHubサポートでも原則復元不可
+
+影響範囲:
+  - プロジェクト構造（フィールド・ビュー設定）
+  - アイテムとプロジェクトの関連付け
+  - プロジェクト固有のメタデータ
+  - アクセス権限・共有設定
+
+保持される情報:
+  ✅ Issue/PR本体（リポジトリに残る）
+  ✅ コミット履歴（影響なし）
+  ✅ リポジトリ構造（影響なし）
+```
+
+**削除APIコマンドの危険度**
+```yaml
+Level 4 (致命的):
+  - gh project delete <id> --owner <owner>
+  - API: deleteProjectV2
+  
+Level 3 (重大):
+  - gh repo delete <owner>/<repo>
+  - 大量Issue/PRの削除操作
+  
+Level 2 (中程度):
+  - Issue/PR個別削除
+  - ブランチ強制削除
+```
+
+#### AI操作特有のリスク要因
+
+**判断速度による危険性増大**
+```yaml
+人間 vs AI の操作特性:
+  人間: 躊躇・再確認・直感的リスク回避
+  AI: 高速実行・論理優先・感情的ブレーキなし
+
+リスク増大要因:
+  - 「空のプロジェクト = 安全」の誤判断
+  - プロジェクトID誤認による意図しない削除
+  - 復旧不可能性の軽視
+  - 効率優先による安全確認省略
+```
+
+**対策実装例**
+```bash
+# AI操作前の安全チェック
+github_operation_safety_wrapper() {
+    local operation="$1"
+    shift
+    local args=("$@")
+    
+    # 危険操作の検出
+    case "$operation" in
+        "project delete"|"repo delete")
+            echo "🚨 CRITICAL OPERATION DETECTED"
+            echo "Operation: $operation ${args[*]}"
+            echo "This operation is IRREVERSIBLE"
+            
+            # 事前確認スクリプト実行
+            if ! pre_operation_safety_check "$operation" "${args[@]}"; then
+                echo "❌ Operation blocked by safety check"
+                return 1
+            fi
+            
+            # 人間承認要求
+            if ! request_human_confirmation "$operation" "${args[*]}"; then
+                echo "❌ Operation cancelled - no human confirmation"
+                return 1
+            fi
+            ;;
+    esac
+    
+    # 実際のコマンド実行
+    gh "$operation" "${args[@]}"
+}
+
+# ghコマンドの安全ラッパー
+alias gh='github_operation_safety_wrapper'
+```
+
+#### 復旧戦略の限界
+
+**バックアップによる復旧の制約**
+```yaml
+完全復旧不可能な要素:
+  - プロジェクト固有のURL・ID
+  - 自動化設定・webhook連携
+  - アクセス履歴・統計情報
+  - 外部ツールとの統合設定
+
+部分復旧可能な要素:
+  - プロジェクト構造（手動再作成）
+  - アイテム一覧（Issue/PR再関連付け）
+  - カスタムフィールド（設定再現）
+  - ビュー設定（手動設定）
+
+復旧所要時間:
+  簡易復旧: 30分-2時間
+  完全復旧: 4-8時間（手動作業含む）
+  設定完全復元: 困難または不可能
+```
+
+**推奨予防策**
+```bash
+# 定期自動バックアップ
+setup_project_backup_cron() {
+    # 日次バックアップのcron設定
+    echo "0 2 * * * /path/to/github-project-backup.js" | crontab -
+    
+    # 操作前バックアップ
+    pre_deletion_backup() {
+        local project_id="$1"
+        echo "Creating pre-deletion backup..."
+        node /path/to/github-project-backup.js "$project_id"
+        
+        # バックアップ成功確認
+        local backup_file="$HOME/.github-project-backups/project-${project_id}-$(date +%Y-%m-%d).json"
+        if [ -f "$backup_file" ]; then
+            echo "✅ Backup created: $backup_file"
+            return 0
+        else
+            echo "❌ Backup failed - aborting operation"
+            return 1
+        fi
+    }
+}
+```
+
 ## 関連文書
 
 - [環境依存リスク](environment-dependencies.md) - 実行環境問題
 - [データ永続性リスク](data-persistence.md) - データ同期問題
 - [緩和戦略集](mitigation-strategies.md) - 包括的対策
+- [GitHub不可逆操作安全ガイド](github-operations-safety.md) - 包括的安全管理
 
 ## 更新履歴
 
@@ -459,6 +599,7 @@ wait_for_rate_limit_reset() {
 |------|---------------|----------|
 | 2025-08-14 | GitHub CLI認証スコープ問題 | 解決済み - 必要スコープ明確化 |
 | 2025-08-14 | GitHub Projects API制限調査 | 基本操作確認済み |
+| 2025-08-14 | GitHub不可逆操作制限セクション追加 | AI安全ガイドとの連携完了 |
 
 ---
 

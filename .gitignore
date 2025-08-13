@@ -82,4 +82,5 @@ EngageDoc-Studio/node_modules/
 **/backup_*.json
 
 # Claude settings (local only)
-.claude/settings.local.json
+.claude/settings.local.jsonaws-cli/
+awscliv2.zip

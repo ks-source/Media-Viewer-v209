@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Function for Presigned URL Generation - Media Viewer v209 Chat Logs Phase 1'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Deployment environment'
+
+  S3StackName:
+    Type: String
+    Description: 'Name of the S3 CloudFormation stack'
+    Default: 'media-viewer-v209-s3-chat-logs'
+
+  FunctionName:
+    Type: String
+    Default: 'media-viewer-v209-presigned-url-generator'
+    Description: 'Name of the Lambda function'
+
+Resources:
+  # Lambda Function for Presigned URL Generation
+  PresignedUrlGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${FunctionName}-${Environment}'
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: 
+        Fn::ImportValue: !Sub '${S3StackName}-LambdaExecutionRoleArn'
+      Code:
+        ZipFile: |
+          const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+          const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+          
+          const s3Client = new S3Client({ region: process.env.AWS_REGION });
+          
+          exports.handler = async (event) => {
+              console.log('Received event:', JSON.stringify(event, null, 2));
+              
+              try {
+                  const { 
+                      action = 'upload',
+                      fileName,
+                      contentType = 'application/json',
+                      expiresIn = 3600 // 1 hour default
+                  } = JSON.parse(event.body || '{}');
+                  
+                  if (!fileName) {
+                      return {
+                          statusCode: 400,
+                          headers: {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*',
+                              'Access-Control-Allow-Headers': 'Content-Type',
+                              'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
+                          },
+                          body: JSON.stringify({
+                              error: 'fileName is required'
+                          })
+                      };
+                  }
+                  
+                  // Sanitize filename and add timestamp
+                  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                  const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+                  const s3Key = `chat-logs/${timestamp}_${sanitizedFileName}`;
+                  
+                  let command;
+                  let url;
+                  
+                  if (action === 'upload') {
+                      command = new PutObjectCommand({
+                          Bucket: process.env.S3_BUCKET_NAME,
+                          Key: s3Key,
+                          ContentType: contentType,
+                          ServerSideEncryption: 'aws:kms',
+                          SSEKMSKeyId: process.env.KMS_KEY_ID,
+                          Metadata: {
+                              'original-filename': fileName,
+                              'upload-timestamp': timestamp,
+                              'content-type': contentType
+                          }
+                      });
+                  } else if (action === 'download') {
+                      command = new GetObjectCommand({
+                          Bucket: process.env.S3_BUCKET_NAME,
+                          Key: s3Key
+                      });
+                  } else {
+                      return {
+                          statusCode: 400,
+                          headers: {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
+                          body: JSON.stringify({
+                              error: 'Invalid action. Use "upload" or "download"'
+                          })
+                      };
+                  }
+                  
+                  url = await getSignedUrl(s3Client, command, { expiresIn });
+                  
+                  console.log(`Generated ${action} URL for: ${s3Key}`);
+                  
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*',
+                          'Access-Control-Allow-Headers': 'Content-Type',
+                          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
+                      },
+                      body: JSON.stringify({
+                          presignedUrl: url,
+                          s3Key: s3Key,
+                          action: action,
+                          expiresIn: expiresIn,
+                          timestamp: timestamp
+                      })
+                  };
+                  
+              } catch (error) {
+                  console.error('Error generating presigned URL:', error);
+                  
+                  return {
+                      statusCode: 500,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      body: JSON.stringify({
+                          error: 'Internal server error',
+                          message: error.message
+                      })
+                  };
+              }
+          };
+      Environment:
+        Variables:
+          S3_BUCKET_NAME:
+            Fn::ImportValue: !Sub '${S3StackName}-BucketName'
+          KMS_KEY_ID:
+            Fn::ImportValue: !Sub '${S3StackName}-KMSKeyId'
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+      MemorySize: 256
+      Description: 'Generates presigned URLs for S3 chat log uploads and downloads'
+      Tags:
+        - Key: 'Environment'
+          Value: !Ref Environment
+        - Key: 'Project'
+          Value: 'MediaViewer-v209'
+        - Key: 'Component'
+          Value: 'ChatLogStorage'
+
+  # Lambda Function URL for direct HTTPS access
+  PresignedUrlGeneratorFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt PresignedUrlGeneratorFunction.Arn
+      AuthType: NONE
+      Cors:
+        AllowCredentials: false
+        AllowHeaders:
+          - 'Content-Type'
+          - 'X-Amz-Date'
+          - 'Authorization'
+          - 'X-Api-Key'
+        AllowMethods:
+          - 'POST'
+          - 'GET'
+          - 'OPTIONS'
+        AllowOrigins:
+          - '*'
+        MaxAge: 300
+
+  # Permission for Function URL to invoke Lambda
+  PresignedUrlGeneratorFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PresignedUrlGeneratorFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  # CloudWatch Log Group for Lambda Function
+  PresignedUrlGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${FunctionName}-${Environment}'
+      RetentionInDays: 14
+
+  # CloudWatch Alarms for Monitoring
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${FunctionName}-${Environment}-errors'
+      AlarmDescription: 'Lambda function error rate is too high'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PresignedUrlGeneratorFunction
+      TreatMissingData: notBreaching
+
+  LambdaDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${FunctionName}-${Environment}-duration'
+      AlarmDescription: 'Lambda function duration is too high'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10000  # 10 seconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PresignedUrlGeneratorFunction
+      TreatMissingData: notBreaching
+
+Outputs:
+  LambdaFunctionArn:
+    Description: 'ARN of the presigned URL generator Lambda function'
+    Value: !GetAtt PresignedUrlGeneratorFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionArn'
+
+  LambdaFunctionName:
+    Description: 'Name of the presigned URL generator Lambda function'
+    Value: !Ref PresignedUrlGeneratorFunction
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaFunctionName'
+
+  FunctionUrl:
+    Description: 'HTTPS URL for the Lambda function'
+    Value: !GetAtt PresignedUrlGeneratorFunctionUrl.FunctionUrl
+    Export:
+      Name: !Sub '${AWS::StackName}-FunctionUrl'
+
+  LogGroupName:
+    Description: 'CloudWatch Log Group for the Lambda function'
+    Value: !Ref PresignedUrlGeneratorLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
