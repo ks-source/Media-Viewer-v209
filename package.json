@@ -1,0 +1,14 @@
+{
+  "name": "media-viewer-v209",
+  "version": "2.0.9",
+  "description": "Media Viewer v209 - ClaudeCode履歴管理システム統合版",
+  "main": "src/js/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^latest"
+  }
+}
